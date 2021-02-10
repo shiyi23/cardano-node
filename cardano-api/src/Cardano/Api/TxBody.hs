@@ -417,7 +417,10 @@ fromTxOut shelleyBasedEra' ledgerTxOut =
                               in TxOut (fromShelleyAddr addr)
                                         (TxOutValue MultiAssetInMaryEra
                                                       (fromMaryValue value))
-    ShelleyBasedEraAlonzo  -> error "fromTxOut error"
+    ShelleyBasedEraAlonzo  -> let (Shelley.TxOut addr value) = ledgerTxOut
+                              in TxOut (fromShelleyAddr addr)
+                                        (TxOutValue MultiAssetInAlonzoEra
+                                                      (fromMaryValue value))
 
 -- ----------------------------------------------------------------------------
 -- Era-dependent transaction body features

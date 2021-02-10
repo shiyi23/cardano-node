@@ -81,8 +81,7 @@ genLovelace = Lovelace <$> Gen.integral (Range.linear 0 5000)
 genScript :: ScriptLanguage lang -> Gen (Script lang)
 genScript (SimpleScriptLanguage lang) =
     SimpleScript lang <$> genSimpleScript lang
-
-genScript (PlutusScriptLanguage lang) = case lang of {}
+genScript (PlutusScriptLanguage PlutusScriptV1) = Gen.discard
 
 genSimpleScript :: SimpleScriptVersion lang -> Gen (SimpleScript lang)
 genSimpleScript lang =
