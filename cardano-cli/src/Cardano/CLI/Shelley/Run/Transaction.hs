@@ -264,6 +264,7 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
         <*> validateTxUpdateProposal era mUpdatePropFile
         <*> validateTxMintValue      era mValue
         <*> validateTxExecutionUnits era (map plutusScriptExecutionUnits plutusScriptBundles)
+        <*> panic "validate"
 
     txBody <-
       firstExceptT (ShelleyTxCmdTxBodyError . SomeTxBodyError) . hoistEither $

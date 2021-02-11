@@ -67,6 +67,7 @@ module Cardano.Api.TxBody (
     CertificatesSupportedInEra(..),
     UpdateProposalSupportedInEra(..),
     TxExecutionUnits(..),
+    TxWitnessPPData(..),
 
     -- ** Feature availability functions
     multiAssetSupportedInEra,
@@ -887,6 +888,13 @@ executionUnitsSupportedInEra AllegraEra = Nothing
 executionUnitsSupportedInEra MaryEra    = Nothing
 executionUnitsSupportedInEra AlonzoEra  = Just ExecutionUnitsSupportedInAlonzoEra
 
+-- ----------------------------------------------------------------------------
+-- Data necessary to create a hash of the script execution data.
+--
+data TxWitnessPPData era where
+    TxWitnessPPData :: ProtocolParameters --TODO: This will need an era parameter to account for Alonzo
+                    -> [(PlutusScriptPurpose era, Word64, ScriptDatum)]
+                    -> TxWitnessPPData era
 
 -- ----------------------------------------------------------------------------
 -- Transaction body content
@@ -905,7 +913,8 @@ data TxBodyContent era =
        txCertificates   :: TxCertificates era,
        txUpdateProposal :: TxUpdateProposal era,
        txMintValue      :: TxMintValue era,
-       txExecutionUnits :: TxExecutionUnits era
+       txExecutionUnits :: TxExecutionUnits era,
+       txWitnessPPData  :: TxWitnessPPData era
      }
 
 
@@ -1421,7 +1430,8 @@ makeByronTransaction txIns txOuts =
         txCertificates   = TxCertificatesNone,
         txUpdateProposal = TxUpdateProposalNone,
         txMintValue      = TxMintNone,
-        txExecutionUnits = TxNoExecutionUnits
+        txExecutionUnits = TxNoExecutionUnits,
+        txWitnessPPData  = error "TODO: TxWitnessPPData era"
       }
 
 -- | Transitional function to help the CLI move to the updated TxBody API.
@@ -1457,7 +1467,8 @@ makeShelleyTransaction txIns txOuts ttl fee
                              Just up -> TxUpdateProposal
                                           UpdateProposalInShelleyEra up,
         txMintValue      = TxMintNone,
-        txExecutionUnits = TxNoExecutionUnits
+        txExecutionUnits  = TxNoExecutionUnits,
+        txWitnessPPData = error "TODO "
       }
 
 

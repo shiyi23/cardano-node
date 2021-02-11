@@ -572,6 +572,7 @@ genTxBodyContent era = do
     , txUpdateProposal = updateProposal
     , txMintValue = mintValue
     , txExecutionUnits = txExecUnits
+    , txWitnessPPData = panic "TODO"
     }
 
 genTxFee :: CardanoEra era -> Gen (TxFee era)
