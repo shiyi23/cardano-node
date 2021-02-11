@@ -66,6 +66,7 @@ module Cardano.Api.TxBody (
     WithdrawalsSupportedInEra(..),
     CertificatesSupportedInEra(..),
     UpdateProposalSupportedInEra(..),
+    TxExecutionUnits(..),
 
     -- ** Feature availability functions
     multiAssetSupportedInEra,
@@ -78,6 +79,7 @@ module Cardano.Api.TxBody (
     withdrawalsSupportedInEra,
     certificatesSupportedInEra,
     updateProposalSupportedInEra,
+    executionUnitsSupportedInEra,
 
     -- * Internal conversion functions & types
     toShelleyTxId,
@@ -866,6 +868,25 @@ data TxMintValue era where
 deriving instance Eq   (TxMintValue era)
 deriving instance Show (TxMintValue era)
 
+-- ----------------------------------------------------------------------------
+-- The cost to execute Plutus scripts (era-dependent)
+--
+
+data TxExecutionUnits era where
+    TxNoExecutionUnits :: TxExecutionUnits era
+    TxExecutionUnits   :: ExecutionUnitsSupportedInEra era -> Word64 -> Word64 -> TxExecutionUnits era
+
+data ExecutionUnitsSupportedInEra era where
+
+     ExecutionUnitsSupportedInAlonzoEra  :: ExecutionUnitsSupportedInEra AlonzoEra
+
+executionUnitsSupportedInEra :: CardanoEra era -> Maybe (ExecutionUnitsSupportedInEra era)
+executionUnitsSupportedInEra ByronEra   = Nothing
+executionUnitsSupportedInEra ShelleyEra = Nothing
+executionUnitsSupportedInEra AllegraEra = Nothing
+executionUnitsSupportedInEra MaryEra    = Nothing
+executionUnitsSupportedInEra AlonzoEra  = Just ExecutionUnitsSupportedInAlonzoEra
+
 
 -- ----------------------------------------------------------------------------
 -- Transaction body content
@@ -883,7 +904,8 @@ data TxBodyContent era =
        txWithdrawals    :: TxWithdrawals era,
        txCertificates   :: TxCertificates era,
        txUpdateProposal :: TxUpdateProposal era,
-       txMintValue      :: TxMintValue era
+       txMintValue      :: TxMintValue era,
+       txExecutionUnits :: TxExecutionUnits era
      }
 
 
@@ -1017,7 +1039,8 @@ instance IsCardanoEra era => SerialiseAsCBOR (TxBody era) where
                         (ShelleyTxBody ShelleyBasedEraAllegra) bs
         MaryEra    -> deserialiseShelleyBasedTxBody
                         (ShelleyTxBody ShelleyBasedEraMary) bs
-        AlonzoEra  -> error "TODO"
+        AlonzoEra  -> deserialiseShelleyBasedTxBody
+                         (ShelleyTxBody ShelleyBasedEraAlonzo) bs
 
 -- | The serialisation format for the different Shelley-based eras are not the
 -- same, but they can be handled generally with one overloaded implementation.
@@ -1340,8 +1363,8 @@ makeShelleyTransactionBody era@ShelleyBasedEraMary
         ss = case txAuxScripts of
                TxAuxScriptsNone   -> []
                TxAuxScripts _ ss' -> ss'
-
-makeShelleyTransactionBody ShelleyBasedEraAlonzo _ = error "TODO"
+-- TODO: Will need to sort TxIns (fees vs not fees)
+makeShelleyTransactionBody ShelleyBasedEraAlonzo _ = error "makeShelleyTransactionBody: Alonzo"
 
 
 toShelleyWithdrawal :: [(StakeAddress, Lovelace)] -> Shelley.Wdrl StandardCrypto
@@ -1397,7 +1420,8 @@ makeByronTransaction txIns txOuts =
         txWithdrawals    = TxWithdrawalsNone,
         txCertificates   = TxCertificatesNone,
         txUpdateProposal = TxUpdateProposalNone,
-        txMintValue      = TxMintNone
+        txMintValue      = TxMintNone,
+        txExecutionUnits = TxNoExecutionUnits
       }
 
 -- | Transitional function to help the CLI move to the updated TxBody API.
@@ -1432,7 +1456,8 @@ makeShelleyTransaction txIns txOuts ttl fee
                              Nothing -> TxUpdateProposalNone
                              Just up -> TxUpdateProposal
                                           UpdateProposalInShelleyEra up,
-        txMintValue      = TxMintNone
+        txMintValue      = TxMintNone,
+        txExecutionUnits = TxNoExecutionUnits
       }
 
 

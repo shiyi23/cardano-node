@@ -185,6 +185,7 @@ renderFeature TxFeatureAuxScripts           = "Auxiliary scripts"
 renderFeature TxFeatureWithdrawals          = "Reward account withdrawals"
 renderFeature TxFeatureCertificates         = "Certificates"
 renderFeature TxFeatureMintValue            = "Asset minting"
+renderFeature TxFeatureExecutionUnits       = "Plutus script execution units"
 renderFeature TxFeatureMultiAssetOutputs    = "Multi-Asset outputs"
 renderFeature TxFeatureScriptWitnesses      = "Script witnesses"
 renderFeature TxFeatureShelleyKeys          = "Shelley keys"
@@ -194,10 +195,11 @@ runTransactionCmd cmd =
   case cmd of
     TxBuildRaw era txins txouts mValue mLowBound mUpperBound
                fee certs wdrls metadataSchema scriptFiles
-               _nonNativeScripts metadataFiles mUpProp out ->
+               plutusScripts metadataFiles mUpProp out ->
       runTxBuildRaw era txins txouts mLowBound mUpperBound
                     fee mValue certs wdrls metadataSchema
-                    scriptFiles metadataFiles mUpProp out
+                    scriptFiles plutusScripts metadataFiles
+                    mUpProp out
     TxSign txinfile skfiles network txoutfile ->
       runTxSign txinfile skfiles network txoutfile
     TxSubmit anyConensusModeParams network txFp ->
@@ -235,6 +237,7 @@ runTxBuildRaw
   -> [(StakeAddress, Lovelace)]
   -> TxMetadataJsonSchema
   -> [ScriptFile]
+  -> [PlutusScriptBundle]
   -> [MetadataFile]
   -> Maybe UpdateProposalFile
   -> TxBodyFile
@@ -243,22 +246,24 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
               mUpperBound mFee mValue
               certFiles withdrawals
               metadataSchema scriptFiles
+              plutusScriptBundles
               metadataFiles mUpdatePropFile
               (TxBodyFile fpath) = do
 
     txBodyContent <-
       TxBodyContent
-        <$> validateTxIns  era txins
+        <$> validateTxIns  era (txins ++ concatMap plutusScriptTxIns plutusScriptBundles)
         <*> validateTxOuts era txouts
         <*> validateTxFee  era mFee
         <*> ((,) <$> validateTxValidityLowerBound era mLowerBound
                  <*> validateTxValidityUpperBound era mUpperBound)
         <*> validateTxMetadataInEra  era metadataSchema metadataFiles
-        <*> validateTxAuxScripts     era scriptFiles
+        <*> validateTxAuxScripts     era (scriptFiles ++ map (ScriptFile . plutusScriptFile) plutusScriptBundles)
         <*> validateTxWithdrawals    era withdrawals
         <*> validateTxCertificates   era certFiles
         <*> validateTxUpdateProposal era mUpdatePropFile
         <*> validateTxMintValue      era mValue
+        <*> validateTxExecutionUnits era (map plutusScriptExecutionUnits plutusScriptBundles)
 
     txBody <-
       firstExceptT (ShelleyTxCmdTxBodyError . SomeTxBodyError) . hoistEither $
@@ -286,6 +291,7 @@ data TxFeature = TxFeatureShelleyAddresses
                | TxFeatureWithdrawals
                | TxFeatureCertificates
                | TxFeatureMintValue
+               | TxFeatureExecutionUnits
                | TxFeatureMultiAssetOutputs
                | TxFeatureScriptWitnesses
                | TxFeatureShelleyKeys
@@ -473,6 +479,16 @@ validateTxMintValue era (Just v) =
        Left _ -> txFeatureMismatch era TxFeatureMintValue
        Right supported -> return (TxMintValue supported v)
 
+
+validateTxExecutionUnits :: CardanoEra era
+                         -> [ExecutionUnits]
+                         -> ExceptT ShelleyTxCmdError IO (TxExecutionUnits era)
+validateTxExecutionUnits _ [] = return TxNoExecutionUnits
+validateTxExecutionUnits era execUnits =
+    case executionUnitsSupportedInEra era of
+      Just supported -> let ExecutionUnits memory steps = mconcat execUnits
+                        in return $ TxExecutionUnits supported memory steps
+      Nothing -> txFeatureMismatch era TxFeatureExecutionUnits
 
 -- ----------------------------------------------------------------------------
 -- Transaction signing

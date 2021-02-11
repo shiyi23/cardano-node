@@ -191,6 +191,7 @@ module Cardano.Api (
     WithdrawalsSupportedInEra(..),
     CertificatesSupportedInEra(..),
     UpdateProposalSupportedInEra(..),
+    TxExecutionUnits(..),
 
     -- ** Feature availability functions
     multiAssetSupportedInEra,
@@ -203,6 +204,7 @@ module Cardano.Api (
     withdrawalsSupportedInEra,
     certificatesSupportedInEra,
     updateProposalSupportedInEra,
+    executionUnitsSupportedInEra,
 
     -- * Signing transactions
     -- | Creating transaction witnesses one by one, or all in one go.

@@ -537,6 +537,15 @@ genTxMintValue era =
         , TxMintValue MultiAssetInAlonzoEra <$> genValueForMinting
         ]
 
+genTxExecutionUnits :: CardanoEra era -> Gen (TxExecutionUnits era)
+genTxExecutionUnits era =
+  case executionUnitsSupportedInEra era of
+    Nothing -> return TxNoExecutionUnits
+    Just supported ->
+      TxExecutionUnits supported
+        <$> Gen.word64 (Range.constant 0 10)
+        <*> Gen.word64 (Range.constant 0 10)
+
 genTxBodyContent :: CardanoEra era -> Gen (TxBodyContent era)
 genTxBodyContent era = do
   trxIns <- Gen.list (Range.constant 1 10) genTxIn
@@ -549,6 +558,7 @@ genTxBodyContent era = do
   certs <- genTxCertificates era
   updateProposal <- genTxUpdateProposal era
   mintValue <- genTxMintValue era
+  txExecUnits <- genTxExecutionUnits era
 
   pure $ TxBodyContent
     { txIns = trxIns
@@ -561,6 +571,7 @@ genTxBodyContent era = do
     , txCertificates = certs
     , txUpdateProposal = updateProposal
     , txMintValue = mintValue
+    , txExecutionUnits = txExecUnits
     }
 
 genTxFee :: CardanoEra era -> Gen (TxFee era)

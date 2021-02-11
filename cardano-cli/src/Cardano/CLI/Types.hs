@@ -118,18 +118,18 @@ newtype Redeemer = Redeemer { unRedeemer :: FilePath } deriving Show
 
 data PlutusScriptBundle
   = PlutusScriptBundle
-      FilePath
-      -- ^ Filepath of Plutus script
-      PlutusScriptType
-      -- ^ What the Plutus script will do
-      ExecutionUnits
-      -- ^ Arbitrary execution unit in which we measure the cost of scripts.
-      [TxInAnyEra]
-      -- ^ Script fees
-      ProtocolParamsFile
-      [Redeemer]
-      (Maybe Datum)
-  deriving Show
+      { plutusScriptFile :: FilePath
+        -- ^ Filepath of Plutus script
+      , plutusScriptType :: PlutusScriptType
+        -- ^ What the Plutus script will do
+      , plutusScriptExecutionUnits :: ExecutionUnits
+        -- ^ Arbitrary execution unit in which we measure the cost of scripts.
+      , plutusScriptTxIns :: [TxInAnyEra]
+        -- ^ Script fees
+      , plutusScriptPParamsFile :: ProtocolParamsFile
+      , plutusScriptRedeemers :: [Redeemer]
+      , plutusScriptDatum :: (Maybe Datum)
+      } deriving Show
 
 -- | The different types of Plutus scripts
 --and what they do.
@@ -155,3 +155,8 @@ data ExecutionUnits = ExecutionUnits
                         Word64
                       deriving Show
 
+instance Semigroup ExecutionUnits where
+  ExecutionUnits a c <> ExecutionUnits b d = ExecutionUnits (a + b) (c + d)
+
+instance Monoid ExecutionUnits where
+  mempty = ExecutionUnits 0 0
