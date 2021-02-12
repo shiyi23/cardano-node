@@ -18,10 +18,10 @@ import           Cardano.Prelude hiding (All, Any, option)
 import           Prelude (String)
 
 import           Cardano.Api
-import           Cardano.Api.Shelley
+import           Cardano.Api.Shelley hiding (PlutusScriptPurpose (..))
 
 import           Cardano.CLI.Mary.TxOutParser (parseTxOutAnyEra)
-import           Cardano.CLI.Mary.ValueParser (parseValue)
+import           Cardano.CLI.Mary.ValueParser (parseValue, policyId)
 import           Cardano.CLI.Shelley.Commands
 import           Cardano.CLI.Shelley.Key (InputFormat (..), VerificationKeyOrFile (..),
                    VerificationKeyOrHashOrFile (..), VerificationKeyTextOrFile (..),
@@ -216,7 +216,6 @@ pPlutusScriptBundle = PlutusScriptBundle
                            <*> pPlutusScriptType
                            <*> pExecutionUnits
                            <*> (many parseFeeTxIn)
-                           <*> pProtocolParamsFile
                            <*> many pRedeemer
                            <*> optional parseDatum
   where
@@ -225,7 +224,7 @@ pPlutusScriptBundle = PlutusScriptBundle
       pSpending <|> pMinting <|> pRewarding <|> pCertifying
 
     pSpending :: Parser PlutusScriptType
-    pSpending = Spending <$> Opt.strOption
+    pSpending = Spending <$> Opt.option (readerFromAttoParser parseTxInAny)
                   (  Opt.long "spending"
                   <> Opt.metavar "TX-IN"
                   <> Opt.help "The transaction input that the non-native script will spend as\
@@ -233,7 +232,7 @@ pPlutusScriptBundle = PlutusScriptBundle
                   )
 
     pMinting :: Parser PlutusScriptType
-    pMinting = Minting <$> Opt.strOption
+    pMinting = Minting <$> Opt.option (readerFromParsecParser policyId)
                  (  Opt.long "minting"
                  <> Opt.metavar "POLICYID"
                  <> Opt.help "The policy ID of the multi-asset that the non-native script will\
@@ -241,7 +240,7 @@ pPlutusScriptBundle = PlutusScriptBundle
                  )
 
     pRewarding :: Parser PlutusScriptType
-    pRewarding = Rewarding <$> Opt.strOption
+    pRewarding = Rewarding <$> Opt.option (readerFromAttoParser parseStakeAddress)
                   (  Opt.long "rewarding"
                   <> Opt.metavar "STAKEADDR"
                   <> Opt.help "The stake address that the non-native script will withdraw\
@@ -249,7 +248,7 @@ pPlutusScriptBundle = PlutusScriptBundle
                   )
 
     pCertifying :: Parser PlutusScriptType
-    pCertifying = Rewarding <$> Opt.strOption
+    pCertifying = Certifying <$> Opt.strOption
                   (  Opt.long "certifying"
                   <> Opt.metavar "FILE"
                   <> Opt.help "Filepath of the delegation certifate that the non-native script\
@@ -614,6 +613,7 @@ pTransaction =
                                  <*> pTxMetadataJsonSchema
                                  <*> many pNativeScript
                                  <*> many pPlutusScriptBundle
+                                 <*> optional pProtocolParamsFile
                                  <*> many pMetadataFile
                                  <*> optional pUpdateProposalFile
                                  <*> pTxBodyFile Output

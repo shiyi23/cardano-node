@@ -126,7 +126,6 @@ data PlutusScriptBundle
         -- ^ Arbitrary execution unit in which we measure the cost of scripts.
       , plutusScriptTxIns :: [TxInAnyEra]
         -- ^ Script fees
-      , plutusScriptPParamsFile :: ProtocolParamsFile
       , plutusScriptRedeemers :: [Redeemer]
       , plutusScriptDatum :: (Maybe Datum)
       } deriving Show
@@ -134,11 +133,11 @@ data PlutusScriptBundle
 -- | The different types of Plutus scripts
 --and what they do.
 data PlutusScriptType
-  = Spending Text
+  = Spending TxInAnyEra
     -- ^ Validates spending a script-locked UTxO
-  | Minting Text
+  | Minting PolicyId
     -- ^ Validates minting new tokens
-  | Rewarding Text
+  | Rewarding StakeAddress
     -- ^ Validates certificate transactions
   | Certifying FilePath
     -- ^ Validates withdrawl from a reward account

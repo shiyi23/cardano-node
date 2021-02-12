@@ -42,6 +42,13 @@ module Cardano.Api.TxBody (
     TxOut(..),
     TxOutValue(..),
 
+    -- ** Plutus script purpose
+    PlutusScriptPurpose(..),
+    generateCertificateRedeemer,
+    generateMintingRedeemer,
+    generateRewardingRedeemer,
+    generateSpendingRedeemer,
+
     -- * Other transaction body types
     TxFee(..),
     TxValidityLowerBound(..),
@@ -68,6 +75,7 @@ module Cardano.Api.TxBody (
     UpdateProposalSupportedInEra(..),
     TxExecutionUnits(..),
     TxWitnessPPData(..),
+    WitnessPPDataSupportedInEra(..),
 
     -- ** Feature availability functions
     multiAssetSupportedInEra,
@@ -81,6 +89,7 @@ module Cardano.Api.TxBody (
     certificatesSupportedInEra,
     updateProposalSupportedInEra,
     executionUnitsSupportedInEra,
+    witnessPPDataSupportedInEra,
 
     -- * Internal conversion functions & types
     toShelleyTxId,
@@ -106,7 +115,7 @@ import           Data.Aeson.Types (ToJSONKey (..), toJSONKeyText)
 import           Data.Bifunctor (first)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
-import           Data.List (intercalate)
+import           Data.List (elemIndex, findIndex, intercalate)
 import qualified Data.List.NonEmpty as NonEmpty
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -284,6 +293,107 @@ data TxInTypeInEra era where
 deriving instance Eq (TxInTypeInEra era)
 deriving instance Ord (TxInTypeInEra era)
 deriving instance Show (TxInTypeInEra era)
+
+-- ----------------------------------------------------------------------------
+-- Plutus script purpose. Plutus scripts in the Alonzo era can do the following:
+--   1. Validate spending a script UTxO entry.
+--   2. Validate minting tokens.
+--   3. Validate certificates with script credentials.
+--   4. Validate reward withdrawals from script addresses.
+
+data PlutusScriptPurpose era where
+  Spending   :: TxIn era     -> PlutusScriptPurpose era
+  Minting    :: PolicyId     -> PlutusScriptPurpose era
+  Certifying :: Certificate  -> PlutusScriptPurpose era
+  Rewarding  :: StakeAddress -> PlutusScriptPurpose era
+
+-- | The 'RedeemerPointer' gives us the index
+-- at which the redeemer exists within a transaction body.
+data RedeemerPointer =
+    CertificateRedeemer Word64
+    -- ^ Gives us the index of a certificate.
+  | MintingRedeemer Word64
+    -- ^ Gives us the index of a multi-asset.
+  | SpendingRedeemer Word64
+    -- ^ Gives us the index of a transaction input.
+  | RewardingRedeemer Word64
+    -- ^ Gives us the index of the withdrawal certificate.
+
+generateRewardingRedeemer
+  :: ScriptLanguageInEra lang era
+  -> (PlutusScriptPurpose era, Maybe ScriptDatum)
+  -> TxWithdrawals era
+  -> Maybe (RedeemerPointer, Maybe ScriptDatum)
+generateRewardingRedeemer PlutusScriptV1InAlonzo (Rewarding stkAddr, mDatum) txWithdrawals =
+  case txWithdrawals of
+    TxWithdrawalsNone -> Nothing
+    TxWithdrawals _era addrs -> do
+      r <- findIndex
+             (\(stakeAddr,_) -> stakeAddr == stkAddr)
+             addrs
+      Just (RewardingRedeemer $ fromIntegral r, mDatum)
+generateRewardingRedeemer _ _ _ = Nothing
+
+generateSpendingRedeemer
+  :: ScriptLanguageInEra lang era
+  -> (PlutusScriptPurpose era, Maybe ScriptDatum)
+  -> [TxIn era]
+  -> Maybe (RedeemerPointer, Maybe ScriptDatum)
+generateSpendingRedeemer PlutusScriptV1InAlonzo (Spending txin, mDatum) txins = do
+  r <- SpendingRedeemer . fromIntegral <$> elemIndex txin txins
+  Just (r, mDatum)
+generateSpendingRedeemer _ _ _ = Nothing
+
+generateCertificateRedeemer
+  :: ScriptLanguageInEra lang era
+  -> (PlutusScriptPurpose era, Maybe ScriptDatum)
+  -> TxCertificates era
+  -> Maybe (RedeemerPointer, Maybe ScriptDatum)
+generateCertificateRedeemer PlutusScriptV1InAlonzo (Certifying cert, mDat) txCerts =
+  case txCerts of
+    TxCertificatesNone -> Nothing
+    TxCertificates _ certs -> do
+      r <- CertificateRedeemer . fromIntegral <$> elemIndex cert certs
+      Just (r, mDat)
+generateCertificateRedeemer _ _ _ = Nothing
+
+generateMintingRedeemer
+ :: ScriptLanguageInEra lang era
+ -> (PlutusScriptPurpose era, Maybe ScriptDatum)
+ -> [TxOut era]
+ -> Maybe (RedeemerPointer, Maybe ScriptDatum)
+generateMintingRedeemer PlutusScriptV1InAlonzo (Minting polId, mDat) txOuts = do
+  let vals = [ val | TxOut _ (TxOutValue _ val) <- txOuts ]
+  r <- findIndex (matchPolicyId polId)
+                 (concatMap valueToList vals)
+  Just (MintingRedeemer $ fromIntegral r, mDat)
+ where
+  matchPolicyId :: PolicyId -> (AssetId, Quantity) -> Bool
+  matchPolicyId _ (AdaAssetId,_) = False
+  matchPolicyId pId (AssetId pid _,_) = pId == pid
+
+generateMintingRedeemer _ _ _ = Nothing
+
+makeTxWitnessPPDataHash
+  :: ScriptLanguageInEra lang era
+  -> TxWitnessPPData era
+  -> [TxIn era]
+  -> TxCertificates era
+  -> [TxOut era]
+  -> TxWithdrawals era
+  -> Maybe Text -- Placeholder. Should be: Maybe (WitnessPPDataHash (Crypto era)
+makeTxWitnessPPDataHash _ TxWitnessPPDataNone _ _ _ _ = Nothing
+makeTxWitnessPPDataHash sLangInEra (TxWitnessPPData _pparams scriptDatTuples)
+                        txins txcerts txouts txWithdrawals =
+  let _redeemers = [ redeemer | sDtups <- scriptDatTuples
+                   , let redeemers = [ generateCertificateRedeemer sLangInEra sDtups txcerts
+                                     , generateSpendingRedeemer sLangInEra sDtups txins
+                                     , generateMintingRedeemer sLangInEra sDtups txouts
+                                     , generateRewardingRedeemer sLangInEra sDtups txWithdrawals
+                                     ]
+                   , redeemer <- redeemers
+                   ]
+  in Nothing
 
 
 instance ToJSON (TxIn era) where
@@ -874,12 +984,20 @@ deriving instance Show (TxMintValue era)
 --
 
 data TxExecutionUnits era where
-    TxNoExecutionUnits :: TxExecutionUnits era
-    TxExecutionUnits   :: ExecutionUnitsSupportedInEra era -> Word64 -> Word64 -> TxExecutionUnits era
+    TxExecutionUnitsNone :: TxExecutionUnits era
+    TxExecutionUnits     :: ExecutionUnitsSupportedInEra era
+                         -> Word64
+                         -- ^ Memory
+                         -> Word64
+                         -- ^ Steps
+                         -> TxExecutionUnits era
 
+deriving instance Show (TxExecutionUnits era)
 data ExecutionUnitsSupportedInEra era where
 
      ExecutionUnitsSupportedInAlonzoEra  :: ExecutionUnitsSupportedInEra AlonzoEra
+
+deriving instance Show (ExecutionUnitsSupportedInEra era)
 
 executionUnitsSupportedInEra :: CardanoEra era -> Maybe (ExecutionUnitsSupportedInEra era)
 executionUnitsSupportedInEra ByronEra   = Nothing
@@ -892,9 +1010,21 @@ executionUnitsSupportedInEra AlonzoEra  = Just ExecutionUnitsSupportedInAlonzoEr
 -- Data necessary to create a hash of the script execution data.
 --
 data TxWitnessPPData era where
+    TxWitnessPPDataNone :: TxWitnessPPData era
     TxWitnessPPData :: ProtocolParameters --TODO: This will need an era parameter to account for Alonzo
-                    -> [(PlutusScriptPurpose era, Word64, ScriptDatum)]
+                    -> [(PlutusScriptPurpose era, Maybe ScriptDatum)]
                     -> TxWitnessPPData era
+
+data WitnessPPDataSupportedInEra era where
+
+    WitnessPPDataSupportedInAlonzoEra  :: WitnessPPDataSupportedInEra AlonzoEra
+
+witnessPPDataSupportedInEra :: CardanoEra era -> Maybe (WitnessPPDataSupportedInEra era)
+witnessPPDataSupportedInEra ByronEra   = Nothing
+witnessPPDataSupportedInEra ShelleyEra = Nothing
+witnessPPDataSupportedInEra AllegraEra = Nothing
+witnessPPDataSupportedInEra MaryEra    = Nothing
+witnessPPDataSupportedInEra AlonzoEra  = Just WitnessPPDataSupportedInAlonzoEra
 
 -- ----------------------------------------------------------------------------
 -- Transaction body content
@@ -1049,7 +1179,7 @@ instance IsCardanoEra era => SerialiseAsCBOR (TxBody era) where
         MaryEra    -> deserialiseShelleyBasedTxBody
                         (ShelleyTxBody ShelleyBasedEraMary) bs
         AlonzoEra  -> deserialiseShelleyBasedTxBody
-                         (ShelleyTxBody ShelleyBasedEraAlonzo) bs
+                        (ShelleyTxBody ShelleyBasedEraAlonzo) bs
 
 -- | The serialisation format for the different Shelley-based eras are not the
 -- same, but they can be handled generally with one overloaded implementation.
@@ -1372,8 +1502,98 @@ makeShelleyTransactionBody era@ShelleyBasedEraMary
         ss = case txAuxScripts of
                TxAuxScriptsNone   -> []
                TxAuxScripts _ ss' -> ss'
--- TODO: Will need to sort TxIns (fees vs not fees)
-makeShelleyTransactionBody ShelleyBasedEraAlonzo _ = error "makeShelleyTransactionBody: Alonzo"
+
+makeShelleyTransactionBody era@ShelleyBasedEraAlonzo
+                           TxBodyContent { txIns,
+                                           txOuts,
+                                           txFee,
+                                           txValidityRange = (lowerBound, upperBound),
+                                           txMetadata,
+                                           txAuxScripts,
+                                           txWithdrawals,
+                                           txCertificates,
+                                           txUpdateProposal,
+                                           txMintValue,
+                                           txExecutionUnits,
+                                           txWitnessPPData
+                                          } = do
+
+    guard (not (null txIns)) ?! TxBodyEmptyTxIns
+    sequence_
+      [ do allPositive
+           allWithinMaxBound
+      | let maxTxOut = fromIntegral (maxBound :: Word64) :: Quantity
+      , txout@(TxOut _ (TxOutValue MultiAssetInAlonzoEra v)) <- txOuts
+      , let allPositive       = case [ q | (_,q) <- valueToList v, q < 0 ] of
+                                  []  -> Right ()
+                                  q:_ -> Left (TxBodyOutputNegative q txout)
+            allWithinMaxBound = case [ q | (_,q) <- valueToList v, q > maxTxOut ] of
+                                  []  -> Right ()
+                                  q:_ -> Left (TxBodyOutputOverflow q txout)
+      ]
+    -- TODO: For Alonzo era txbody
+    let _txWitnessPPDataHash = makeTxWitnessPPDataHash
+                                 PlutusScriptV1InAlonzo
+                                 txWitnessPPData
+                                 txIns
+                                 txCertificates
+                                 txOuts
+                                 txWithdrawals
+        _plutusScriptHash = show txAuxScripts --TODO: sort and hash
+        _executionUnits = show txExecutionUnits
+
+    case txMetadata of
+      TxMetadataNone      -> return ()
+      TxMetadataInEra _ m -> validateTxMetadata m ?!. TxBodyMetadataError
+    case txMintValue of
+      TxMintNone      -> return ()
+      TxMintValue _ v -> guard (selectLovelace v == 0) ?! TxBodyMintAdaError
+
+    return $
+      ShelleyTxBody era
+        (Allegra.TxBody
+          (Set.fromList (map toShelleyTxIn  txIns))
+          (Seq.fromList (map toShelleyTxOut txOuts))
+          (case txCertificates of
+             TxCertificatesNone  -> Seq.empty
+             TxCertificates _ cs -> Seq.fromList (map toShelleyCertificate cs))
+          (case txWithdrawals of
+             TxWithdrawalsNone  -> Shelley.Wdrl Map.empty
+             TxWithdrawals _ ws -> toShelleyWithdrawal ws)
+          (case txFee of
+             TxFeeImplicit era'  -> case era' of {}
+             TxFeeExplicit _ fee -> toShelleyLovelace fee)
+          (Allegra.ValidityInterval {
+             Allegra.invalidBefore    = case lowerBound of
+                                          TxValidityNoLowerBound   -> SNothing
+                                          TxValidityLowerBound _ s -> SJust s,
+             Allegra.invalidHereafter = case upperBound of
+                                          TxValidityNoUpperBound _ -> SNothing
+                                          TxValidityUpperBound _ s -> SJust s
+           })
+          (case txUpdateProposal of
+             TxUpdateProposalNone -> SNothing
+             TxUpdateProposal _ p -> SJust (toShelleyUpdate p))
+          (maybeToStrictMaybe
+            (Ledger.hashAuxiliaryData @StandardMary <$> txAuxData))
+          (case txMintValue of
+             TxMintNone      -> mempty
+             TxMintValue _ v -> toMaryValue v))
+        txAuxData
+  where
+    txAuxData :: Maybe (Ledger.AuxiliaryData StandardMary)
+    txAuxData
+      | Map.null ms
+      , null ss   = Nothing
+      | otherwise = Just (toAllegraAuxiliaryData ms ss)
+      where
+        ms = case txMetadata of
+               TxMetadataNone                     -> Map.empty
+               TxMetadataInEra _ (TxMetadata ms') -> ms'
+        ss = case txAuxScripts of
+               TxAuxScriptsNone   -> []
+               TxAuxScripts _ ss' -> ss'
+
 
 
 toShelleyWithdrawal :: [(StakeAddress, Lovelace)] -> Shelley.Wdrl StandardCrypto
@@ -1430,8 +1650,8 @@ makeByronTransaction txIns txOuts =
         txCertificates   = TxCertificatesNone,
         txUpdateProposal = TxUpdateProposalNone,
         txMintValue      = TxMintNone,
-        txExecutionUnits = TxNoExecutionUnits,
-        txWitnessPPData  = error "TODO: TxWitnessPPData era"
+        txExecutionUnits = TxExecutionUnitsNone,
+        txWitnessPPData  = TxWitnessPPDataNone
       }
 
 -- | Transitional function to help the CLI move to the updated TxBody API.
@@ -1467,8 +1687,8 @@ makeShelleyTransaction txIns txOuts ttl fee
                              Just up -> TxUpdateProposal
                                           UpdateProposalInShelleyEra up,
         txMintValue      = TxMintNone,
-        txExecutionUnits  = TxNoExecutionUnits,
-        txWitnessPPData = error "TODO "
+        txExecutionUnits = TxExecutionUnitsNone,
+        txWitnessPPData  = TxWitnessPPDataNone
       }
 
 

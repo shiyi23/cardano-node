@@ -176,6 +176,8 @@ data TransactionCmd
       [ScriptFile]
       -- ^ Auxillary scripts
       [PlutusScriptBundle]
+      (Maybe ProtocolParamsFile)
+      -- ^ Must be specified when including plutus scripts
       [MetadataFile]
       (Maybe UpdateProposalFile)
       TxBodyFile

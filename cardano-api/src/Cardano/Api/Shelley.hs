@@ -96,6 +96,9 @@ module Cardano.Api.Shelley
     toShelleyScriptHash,
     fromShelleyScriptHash,
 
+    -- ** Plutus script purpose
+    PlutusScriptPurpose(..),
+
     -- * Certificates
     Certificate (..),
     toShelleyCertificate,

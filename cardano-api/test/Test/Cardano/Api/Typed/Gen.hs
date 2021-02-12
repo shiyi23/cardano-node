@@ -540,7 +540,7 @@ genTxMintValue era =
 genTxExecutionUnits :: CardanoEra era -> Gen (TxExecutionUnits era)
 genTxExecutionUnits era =
   case executionUnitsSupportedInEra era of
-    Nothing -> return TxNoExecutionUnits
+    Nothing -> return TxExecutionUnitsNone
     Just supported ->
       TxExecutionUnits supported
         <$> Gen.word64 (Range.constant 0 10)

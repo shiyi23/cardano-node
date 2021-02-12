@@ -34,9 +34,6 @@ module Cardano.Api.Script (
     languageOfScriptLanguageInEra,
     eraOfScriptLanguageInEra,
 
-    -- ** Plutus script purpose
-    PlutusScriptPurpose(..),
-
     -- ** Plutus script datum
     ScriptDatum(..),
 
@@ -417,19 +414,6 @@ instance SerialiseAsCBOR ScriptInAnyLang where
 
 instance HasTextEnvelope ScriptInAnyLang where
     textEnvelopeType _ = "Script"
-
--- ----------------------------------------------------------------------------
--- Plutus script purpose. Plutus scripts in the Alonzo era can do the following:
---   1. Validate spending a script UTxO entry.
---   2. Validate minting tokens.
---   3. Validate certificates with script credentials.
---   4. Validate reward withdrawals from script addresses.
-
-data PlutusScriptPurpose era where
-  Spending   :: PlutusScriptPurpose era
-  Minting    :: PlutusScriptPurpose era
-  Certifying :: PlutusScriptPurpose era
-  Rewarding  :: PlutusScriptPurpose era
 
 -- ----------------------------------------------------------------------------
 -- Plutus script datum. All transaction outputs that are locked by Plutus scripts must include

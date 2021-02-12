@@ -26,7 +26,8 @@ import           Control.Monad.Trans.Except.Extra (firstExceptT, handleIOExceptT
 
 import           Cardano.Api
 import           Cardano.Api.Byron hiding (SomeByronSigningKey (..))
-import           Cardano.Api.Shelley
+import           Cardano.Api.Shelley hiding (PlutusScriptPurpose (..))
+import qualified Cardano.Api.Shelley as Api
 import           Ouroboros.Consensus.Shelley.Eras (StandardAllegra, StandardMary, StandardShelley)
 
 --TODO: do this nicely via the API too:
@@ -79,6 +80,7 @@ data ShelleyTxCmdError
   | ShelleyTxCmdWitnessEraMismatch AnyCardanoEra AnyCardanoEra WitnessFile
   | ShelleyTxCmdScriptLanguageNotSupportedInEra AnyScriptLanguage AnyCardanoEra
   | ShelleyTxCmdGenesisCmdError !ShelleyGenesisCmdError
+  | ShelleyTxCmdPParamsNotSpecifiedPlutusScript
   deriving Show
 
 data SomeTxBodyError where
@@ -160,6 +162,8 @@ renderShelleyTxCmdError err =
        "Submitting " <> renderEra era <> " era transaction (" <> show fp <>
        ") is not supported in the " <> renderMode mode <> " consensus mode."
     ShelleyTxCmdGenesisCmdError e -> renderShelleyGenesisCmdError e
+    ShelleyTxCmdPParamsNotSpecifiedPlutusScript ->
+      "The protocol parameters file was not specified with the Plutus script(s)."
 
 renderEra :: AnyCardanoEra -> Text
 renderEra (AnyCardanoEra ByronEra)   = "Byron"
@@ -189,16 +193,17 @@ renderFeature TxFeatureExecutionUnits       = "Plutus script execution units"
 renderFeature TxFeatureMultiAssetOutputs    = "Multi-Asset outputs"
 renderFeature TxFeatureScriptWitnesses      = "Script witnesses"
 renderFeature TxFeatureShelleyKeys          = "Shelley keys"
+renderFeature TxFeatureWitnessPPData        = "Witness PP Data"
 
 runTransactionCmd :: TransactionCmd -> ExceptT ShelleyTxCmdError IO ()
 runTransactionCmd cmd =
   case cmd of
     TxBuildRaw era txins txouts mValue mLowBound mUpperBound
                fee certs wdrls metadataSchema scriptFiles
-               plutusScripts metadataFiles mUpProp out ->
+               plutusScripts mPparamsFile metadataFiles mUpProp out ->
       runTxBuildRaw era txins txouts mLowBound mUpperBound
                     fee mValue certs wdrls metadataSchema
-                    scriptFiles plutusScripts metadataFiles
+                    scriptFiles plutusScripts mPparamsFile metadataFiles
                     mUpProp out
     TxSign txinfile skfiles network txoutfile ->
       runTxSign txinfile skfiles network txoutfile
@@ -238,6 +243,7 @@ runTxBuildRaw
   -> TxMetadataJsonSchema
   -> [ScriptFile]
   -> [PlutusScriptBundle]
+  -> Maybe ProtocolParamsFile
   -> [MetadataFile]
   -> Maybe UpdateProposalFile
   -> TxBodyFile
@@ -246,13 +252,17 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
               mUpperBound mFee mValue
               certFiles withdrawals
               metadataSchema scriptFiles
-              plutusScriptBundles
+              plutusScriptBundles mParamsFile -- TODO: Left of here. You need to have one parser for scripts not separate ones
               metadataFiles mUpdatePropFile
               (TxBodyFile fpath) = do
+    -- Plutus script fees
+    validatedPlutusFees <- validateTxIns era (concatMap plutusScriptTxIns plutusScriptBundles)
+
+    validatedTxIns <- validateTxIns era txins
 
     txBodyContent <-
       TxBodyContent
-        <$> validateTxIns  era (txins ++ concatMap plutusScriptTxIns plutusScriptBundles)
+        <$> return (validatedTxIns ++ validatedPlutusFees)
         <*> validateTxOuts era txouts
         <*> validateTxFee  era mFee
         <*> ((,) <$> validateTxValidityLowerBound era mLowerBound
@@ -260,11 +270,14 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
         <*> validateTxMetadataInEra  era metadataSchema metadataFiles
         <*> validateTxAuxScripts     era (scriptFiles ++ map (ScriptFile . plutusScriptFile) plutusScriptBundles)
         <*> validateTxWithdrawals    era withdrawals
-        <*> validateTxCertificates   era certFiles
+        <*> validateTxCertificates era certFiles
         <*> validateTxUpdateProposal era mUpdatePropFile
         <*> validateTxMintValue      era mValue
         <*> validateTxExecutionUnits era (map plutusScriptExecutionUnits plutusScriptBundles)
-        <*> panic "validate"
+        <*> validateTxWitnessPPData era mParamsFile
+              (map plutusScriptType plutusScriptBundles)
+              (map plutusScriptDatum plutusScriptBundles)
+
 
     txBody <-
       firstExceptT (ShelleyTxCmdTxBodyError . SomeTxBodyError) . hoistEither $
@@ -272,6 +285,12 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
 
     firstExceptT ShelleyTxCmdWriteFileError . newExceptT $
       writeFileTextEnvelope fpath Nothing txBody
+
+
+
+  --case plutScrType of
+  --  Spending txin ->
+
 
 
 -- ----------------------------------------------------------------------------
@@ -296,6 +315,7 @@ data TxFeature = TxFeatureShelleyAddresses
                | TxFeatureMultiAssetOutputs
                | TxFeatureScriptWitnesses
                | TxFeatureShelleyKeys
+               | TxFeatureWitnessPPData
   deriving Show
 
 txFeatureMismatch :: CardanoEra era
@@ -484,12 +504,62 @@ validateTxMintValue era (Just v) =
 validateTxExecutionUnits :: CardanoEra era
                          -> [ExecutionUnits]
                          -> ExceptT ShelleyTxCmdError IO (TxExecutionUnits era)
-validateTxExecutionUnits _ [] = return TxNoExecutionUnits
+validateTxExecutionUnits _ [] = return TxExecutionUnitsNone
 validateTxExecutionUnits era execUnits =
     case executionUnitsSupportedInEra era of
       Just supported -> let ExecutionUnits memory steps = mconcat execUnits
                         in return $ TxExecutionUnits supported memory steps
       Nothing -> txFeatureMismatch era TxFeatureExecutionUnits
+
+validateTxWitnessPPData :: forall era. CardanoEra era
+                        -> Maybe ProtocolParamsFile
+                        -> [PlutusScriptType]
+                        -> [Maybe Datum]
+                        -> ExceptT ShelleyTxCmdError IO (TxWitnessPPData era)
+validateTxWitnessPPData _ _ _ [] = return TxWitnessPPDataNone
+validateTxWitnessPPData era mPParams scriptTypes mDatums =
+  case witnessPPDataSupportedInEra era of
+    Just _supported ->
+        case mPParams of
+          Nothing -> left ShelleyTxCmdPParamsNotSpecifiedPlutusScript
+          Just _pParamsFile -> toTxWitnessPPData (panic "Read pparams") scriptTypes mDatums
+          -- TODO: WE need to generate the REdeemer Datum Map here using generateMintingRedeemer etc.. left off here
+          -- This will create more requirements (i.e you need policyId, Value, stake address etc)
+          -- so this function will probably need to live in a where clause in runTxBuildRaw
+
+    Nothing -> txFeatureMismatch era TxFeatureWitnessPPData
+ where
+   toTxWitnessPPData :: ProtocolParameters
+                     -> [PlutusScriptType]
+                     -> [Maybe Datum]
+                     -> ExceptT ShelleyTxCmdError IO (TxWitnessPPData era)
+   toTxWitnessPPData pParams pStypes mDatums' = do
+     sPurposes <- mapM toPlutusScriptPurpose pStypes
+     sDatums <- return $ map toScriptDatum mDatums'
+     return $ TxWitnessPPData pParams $ zip sPurposes sDatums
+
+
+
+   toScriptDatum :: Maybe Datum -> Maybe ScriptDatum
+   toScriptDatum (Just (Datum _)) = Just (ScriptDatum ())
+   toScriptDatum Nothing = Nothing
+
+   toPlutusScriptPurpose :: PlutusScriptType
+                         -> ExceptT ShelleyTxCmdError IO (PlutusScriptPurpose era)
+   toPlutusScriptPurpose (Spending txin) = do
+     -- TODO: This can be pure
+     res <- validateTxIns era [txin]
+     case res of
+       [x] -> return $ Api.Spending x
+       _ -> panic "Impossible"
+   toPlutusScriptPurpose (Minting policyId) = return $ Api.Minting policyId
+   toPlutusScriptPurpose (Rewarding rewardAcct) = return $ Api.Rewarding rewardAcct
+   toPlutusScriptPurpose (Certifying certificate) = do
+    --TODO: This can be pure
+     res <- validateTxCertificates era [CertificateFile certificate]
+     case res of
+       TxCertificates _ [x] -> return $ Api.Certifying x
+       _ -> panic "impossible"
 
 -- ----------------------------------------------------------------------------
 -- Transaction signing

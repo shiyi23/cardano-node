@@ -25,8 +25,7 @@ parseTxOutAnyEra = do
     -- Accept the old style of separating the address and value in a
     -- transaction output:
     option () (char '+' >> spaces)
-    v <- parseValue
-    return $ TxOutAnyEra addr v
+    TxOutAnyEra addr <$> parseValue
 
 parseAddressAny :: Parser AddressAny
 parseAddressAny = do
