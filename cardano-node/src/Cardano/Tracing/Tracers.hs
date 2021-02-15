@@ -66,6 +66,7 @@ import qualified Ouroboros.Consensus.Network.NodeToNode as NodeToNode
 import qualified Ouroboros.Consensus.Node.Run as Consensus (RunNode)
 import qualified Ouroboros.Consensus.Node.Tracers as Consensus
 import           Ouroboros.Consensus.Protocol.Abstract (ValidationErr)
+import qualified Ouroboros.Consensus.Shelley.Protocol.HotKey as HotKey
 
 import qualified Ouroboros.Network.AnchoredFragment as AF
 import           Ouroboros.Network.Block (BlockNo (..), HasHeader (..), Point, StandardHash,
@@ -660,6 +661,32 @@ teeForge' tr =
           LogValue "forgedInvalidSlotLast" $ PureI $ fromIntegral $ unSlotNo slot
         Consensus.TraceAdoptedBlock slot _ _ ->
           LogValue "adoptedSlotLast" $ PureI $ fromIntegral $ unSlotNo slot
+    -- Check again if there is a ForgeStateUpdateError...
+    case ev of
+      Consensus.TraceForgeStateUpdateError _ reason -> do
+        -- KES-key cannot be evolved, so anyway trace KES-values.
+        let err :: HotKey.KESEvolutionError
+            err = reason -- TODO: FIX!
+            kesInfo :: HotKey.KESInfo
+            kesInfo =
+              case err of
+                HotKey.KESCouldNotEvolve ki _ -> ki
+                HotKey.KESKeyAlreadyPoisoned ki _ -> ki
+            logValues :: [LOContent a]
+            logValues =
+              [ LogValue "operationalCertificateStartKESPeriod"
+                  $ PureI
+                  $ fromIntegral (HotKey.kesStartPeriod kesInfo)
+              , LogValue "operationalCertificateExpiryKESPeriod"
+                  $ PureI
+                  $ fromIntegral (HotKey.kesEndPeriod kesInfo)
+              , LogValue "currentKESPeriod"
+                  $ PureI 0
+              , LogValue "remainingKESPeriods"
+                  $ PureI 0
+              ]
+        mapM_ (traceNamedObject (appendName "metrics" tr) . (meta,)) logValues
+      _ -> pure ()
 
 forgeTracer
   :: ( Consensus.RunNode blk
