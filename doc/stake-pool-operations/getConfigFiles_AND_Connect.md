@@ -34,7 +34,8 @@ Get the complete list of available options with `cardano-node run --help`
 	--topology FILEPATH             The path to a file describing the topology.
   	--database-path FILEPATH        Directory where the state is stored.
   	--socket-path FILEPATH          Path to a cardano-node socket
-  	--host-addr HOST-NAME           Optionally limit node to one ipv6 or ipv4 address
+  	--host-addr IP-ADDRESS          Optionally limit node to one IPv4 address
+  	--host-ipv6-addr IP-ADDRESS     Optionally limit node to one IPv6 address
   	--port PORT                     The port number
   	--config NODE-CONFIGURATION     Configuration file for the cardano-node
   	--validate-db                   Validate all on-disk database files
@@ -64,9 +65,9 @@ Check that the node is syncing by fetching the current tip. When syncing slotNo 
         cardano-cli query tip --mainnet
 
         {
-        "blockNo": 36322,
-        "headerHash": "3f1bea22be21452415851ae670f4bac9340471cb7f2f6a664fac56d7f60dbaad",
-        "slotNo": 888561
+            "blockNo": 36322,
+            "headerHash": "3f1bea22be21452415851ae670f4bac9340471cb7f2f6a664fac56d7f60dbaad",
+            "slotNo": 888561
         }
 
 **Note**`--mainnet` identifies the Cardano mainnet, for testnets use `--testnet-magic 1097911063` instead.

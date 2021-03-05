@@ -31,8 +31,13 @@ import           GHC.Clock (getMonotonicTimeNSec)
 import           Codec.CBOR.Read (DeserialiseFailure)
 import           Data.Aeson (ToJSON (..), Value (..))
 import qualified Data.HashMap.Strict as Map
+import qualified Data.Map as SMap
 import qualified Data.Text as Text
 import           Data.Time (UTCTime)
+import qualified System.Remote.Monitoring as EKG
+import qualified System.Metrics.Gauge as Gauge
+import qualified System.Metrics.Label as Label
+import qualified System.Metrics.Counter as Counter
 
 import           Network.Mux (MuxTrace, WithMuxBearer)
 import qualified Network.Socket as Socket (SockAddr)
@@ -49,7 +54,7 @@ import           Cardano.BM.Internal.ElidingTracer
 import           Cardano.BM.Trace (traceNamedObject)
 import           Cardano.BM.Tracing
 
-import           Ouroboros.Consensus.Block (BlockProtocol, CannotForge, ConvertRawHash,
+import           Ouroboros.Consensus.Block (BlockConfig, BlockProtocol, CannotForge, ConvertRawHash,
                      ForgeStateInfo, ForgeStateUpdateError, Header, realPointSlot)
 import           Ouroboros.Consensus.BlockchainTime (SystemStart (..),
                      TraceBlockchainTimeEvent (..))
@@ -66,6 +71,7 @@ import qualified Ouroboros.Consensus.Network.NodeToNode as NodeToNode
 import qualified Ouroboros.Consensus.Node.Run as Consensus (RunNode)
 import qualified Ouroboros.Consensus.Node.Tracers as Consensus
 import           Ouroboros.Consensus.Protocol.Abstract (ValidationErr)
+import qualified Ouroboros.Consensus.Shelley.Protocol.HotKey as HotKey
 
 import qualified Ouroboros.Network.AnchoredFragment as AF
 import           Ouroboros.Network.Block (BlockNo (..), HasHeader (..), Point, StandardHash,
@@ -96,10 +102,14 @@ import           Cardano.Node.Protocol.Shelley ()
 import           Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
 import           Ouroboros.Consensus.MiniProtocol.ChainSync.Server
 import           Ouroboros.Network.TxSubmission.Inbound
+import           Ouroboros.Consensus.Block.SupportsMetrics
 
 import qualified Ouroboros.Network.Diffusion as ND
 import qualified Cardano.Node.STM as STM
 import qualified Control.Concurrent.STM as STM
+import qualified Ouroboros.Network.AnchoredSeq as AS
+
+import           Shelley.Spec.Ledger.OCert (KESPeriod (..))
 
 {- HLINT ignore "Redundant bracket" -}
 {- HLINT ignore "Use record patterns" -}
@@ -267,23 +277,31 @@ mkTracers
   :: forall peer localPeer blk.
      ( Consensus.RunNode blk
      , HasKESMetricsData blk
+     , HasKESInfo blk
      , TraceConstraints blk
      , Show peer, Eq peer
      , Show localPeer
      )
-  => TraceOptions
+  => BlockConfig blk
+  -> TraceOptions
   -> Trace IO Text
   -> NodeKernelData blk
+  -> Maybe EKGDirect
   -> IO (Tracers peer localPeer blk)
-mkTracers tOpts@(TracingOn trSel) tr nodeKern = do
+mkTracers blockConfig tOpts@(TracingOn trSel) tr nodeKern ekgDirect = do
   fStats <- mkForgingStats
-  consensusTracers <- mkConsensusTracers trSel verb tr nodeKern fStats
+  consensusTracers <- mkConsensusTracers ekgDirect trSel verb tr nodeKern fStats
   elidedChainDB <- newstate  -- for eliding messages in ChainDB tracer
 
   pure Tracers
     { chainDBTracer = tracerOnOff' (traceChainDB trSel) $
-        annotateSeverity $ teeTraceChainTip tOpts elidedChainDB
-                             (appendName "ChainDB" tr) (appendName "metrics" tr)
+        annotateSeverity $ teeTraceChainTip
+                             blockConfig
+                             fStats
+                             tOpts elidedChainDB
+                             ekgDirect
+                             (appendName "ChainDB" tr)
+                             (appendName "metrics" tr)
     , consensusTracers = consensusTracers
     , nodeToClientTracers = nodeToClientTracers' trSel verb tr
     , nodeToNodeTracers = nodeToNodeTracers' trSel verb tr
@@ -302,7 +320,7 @@ mkTracers tOpts@(TracingOn trSel) tr nodeKern = do
    verb :: TracingVerbosity
    verb = traceVerbosity trSel
 
-mkTracers TracingOff _ _ =
+mkTracers _ TracingOff _ _ _ =
   pure Tracers
     { chainDBTracer = nullTracer
     , consensusTracers = Consensus.Tracers
@@ -356,17 +374,21 @@ teeTraceChainTip
      , InspectLedger blk
      , ToObject (Header blk)
      , ToObject (LedgerEvent blk)
+     , BlockSupportsMetrics blk
      )
-  => TraceOptions
+  => BlockConfig blk
+  -> ForgingStats
+  -> TraceOptions
   -> MVar (Maybe (WithSeverity (ChainDB.TraceEvent blk)), Integer)
+  -> Maybe EKGDirect
   -> Trace IO Text
   -> Trace IO Text
   -> Tracer IO (WithSeverity (ChainDB.TraceEvent blk))
-teeTraceChainTip TracingOff _ _ _ = nullTracer
-teeTraceChainTip (TracingOn trSel) elided trTrc trMet =
+teeTraceChainTip _ _ TracingOff _ _ _ _ = nullTracer
+teeTraceChainTip blockConfig fStats (TracingOn trSel) elided ekgDirect trTrc trMet =
   Tracer $ \ev -> do
     traceWith (teeTraceChainTipElide (traceVerbosity trSel) elided trTrc) ev
-    traceWith (ignoringSeverity (traceChainMetrics trMet)) ev
+    traceWith (ignoringSeverity (traceChainMetrics ekgDirect blockConfig fStats trMet)) ev
 
 teeTraceChainTipElide
   :: ( ConvertRawHash blk
@@ -386,39 +408,101 @@ ignoringSeverity :: Tracer IO a -> Tracer IO (WithSeverity a)
 ignoringSeverity tr = Tracer $ \(WithSeverity _ ev) -> traceWith tr ev
 {-# INLINE ignoringSeverity #-}
 
+countMyBlocks
+  :: forall blk. ()
+  => HasHeader (Header blk)
+  => BlockSupportsMetrics blk
+  => BlockConfig blk
+  -> AF.AnchoredFragment (Header blk)
+  -> Int64
+countMyBlocks blockConfig = fromIntegral . length . AS.filter isMine
+  where isMine :: Header blk -> Bool
+        isMine header = isSelfIssued blockConfig header == IsSelfIssued
+
 traceChainMetrics
-  :: forall blk. HasHeader (Header blk)
-  => Trace IO Text -> Tracer IO (ChainDB.TraceEvent blk)
-traceChainMetrics tr = Tracer $ \ev ->
-  fromMaybe (pure ()) $
-    doTrace <$> chainTipInformation ev
- where
-   chainTipInformation :: ChainDB.TraceEvent blk -> Maybe ChainInformation
-   chainTipInformation = \case
-     ChainDB.TraceAddBlockEvent ev -> case ev of
-       ChainDB.SwitchedToAFork _warnings newTipInfo _ newChain ->
-         Just $ chainInformation newTipInfo newChain
-       ChainDB.AddedToCurrentChain _warnings newTipInfo _ newChain ->
-         Just $ chainInformation newTipInfo newChain
-       _ -> Nothing
-     _ -> Nothing
+  :: forall blk. ()
+  => HasHeader (Header blk)
+  => BlockSupportsMetrics blk
+  => Maybe EKGDirect
+  -> BlockConfig blk
+  -> ForgingStats
+  -> Trace IO Text
+  -> Tracer IO (ChainDB.TraceEvent blk)
+traceChainMetrics Nothing _ _ _ = nullTracer
+traceChainMetrics (Just _ekgDirect) blockConfig fStats tr = do
+  -- Blocks forged by the current node on the currently selected chain since last restart due to
+  -- an 'TraceAddBlockEvent' event.
+  let tBlocksUncoupled = fsBlocksUncoupled fStats
+  Tracer $ \ev ->
+    fromMaybe (pure ()) $ doTrace tBlocksUncoupled <$> chainTipInformation ev
+  where
+    chainTipInformation :: ChainDB.TraceEvent blk -> Maybe ChainInformation 
+    chainTipInformation = \case
+      ChainDB.TraceAddBlockEvent ev -> case ev of
+        ChainDB.SwitchedToAFork _warnings newTipInfo oldChain newChain ->
+          let blocksUncoupledDelta = countMyBlocks blockConfig oldChain - countMyBlocks blockConfig newChain in
+          Just $ chainInformation newTipInfo newChain blocksUncoupledDelta
+        ChainDB.AddedToCurrentChain _warnings newTipInfo oldChain newChain ->
+          let blocksUncoupledDelta = countMyBlocks blockConfig oldChain - countMyBlocks blockConfig newChain in
+          Just $ chainInformation newTipInfo newChain blocksUncoupledDelta
+        _ -> Nothing
+      _ -> Nothing
+    doTrace :: STM.TVar Int64 -> ChainInformation -> IO ()
 
-   doTrace :: ChainInformation -> IO ()
-   doTrace ChainInformation { slots, blocks, density, epoch, slotInEpoch } = do
-     -- TODO this is executed each time the chain changes. How cheap is it?
-     meta <- mkLOMeta Critical Public
+    doTrace
+        tBlocksUncoupled
+        ChainInformation { slots, blocks, density, epoch, slotInEpoch, blocksUncoupledDelta } = do
+      -- TODO this is executed each time the newFhain changes. How cheap is it?
+      meta <- mkLOMeta Critical Public
 
-     traceD tr meta "density"     (fromRational density)
-     traceI tr meta "slotNum"     slots
-     traceI tr meta "blockNum"    blocks
-     traceI tr meta "slotInEpoch" slotInEpoch
-     traceI tr meta "epoch"       (unEpochNo epoch)
+      traceD tr meta "density"     (fromRational density)
+      traceI tr meta "slotNum"     slots
+      traceI tr meta "blockNum"    blocks
+      traceI tr meta "slotInEpoch" slotInEpoch
+      traceI tr meta "epoch"       (unEpochNo epoch)
+      when (blocksUncoupledDelta /= 0) $ traceI tr meta "myBlocksUncoupled" =<< STM.modifyReadTVarIO tBlocksUncoupled (+ blocksUncoupledDelta)
 
 traceD :: Trace IO a -> LOMeta -> Text -> Double -> IO ()
 traceD tr meta msg d = traceNamedObject tr (meta, LogValue msg (PureD d))
 
 traceI :: Integral i => Trace IO a -> LOMeta -> Text -> i -> IO ()
 traceI tr meta msg i = traceNamedObject tr (meta, LogValue msg (PureI (fromIntegral i)))
+
+sendEKGDirectCounter :: EKGDirect -> Text -> IO ()
+sendEKGDirectCounter ekgDirect name = do
+  modifyMVar_ (ekgCounters ekgDirect) $ \registeredMap -> do
+    case SMap.lookup name registeredMap of
+      Just counter -> do
+        Counter.inc counter
+        pure registeredMap
+      Nothing -> do
+        counter <- EKG.getCounter name (ekgServer ekgDirect)
+        Counter.inc counter
+        pure $ SMap.insert name counter registeredMap
+
+_sendEKGDirectInt :: Integral a => EKGDirect -> Text -> a -> IO ()
+_sendEKGDirectInt ekgDirect name val = do
+  modifyMVar_ (ekgGauges ekgDirect) $ \registeredMap -> do
+    case SMap.lookup name registeredMap of
+      Just gauge -> do
+        Gauge.set gauge (fromIntegral val)
+        pure registeredMap
+      Nothing -> do
+        gauge <- EKG.getGauge name (ekgServer ekgDirect)
+        Gauge.set gauge (fromIntegral val)
+        pure $ SMap.insert name gauge registeredMap
+
+_sendEKGDirectDouble :: EKGDirect -> Text -> Double -> IO ()
+_sendEKGDirectDouble ekgDirect name val = do
+  modifyMVar_ (ekgLabels ekgDirect) $ \registeredMap -> do
+    case SMap.lookup name registeredMap of
+      Just label -> do
+        Label.set label (Text.pack (show val))
+        pure registeredMap
+      Nothing -> do
+        label <- EKG.getLabel name (ekgServer ekgDirect)
+        Label.set label (Text.pack (show val))
+        pure $ SMap.insert name label registeredMap
 
 --------------------------------------------------------------------------------
 -- Consensus Tracers
@@ -446,15 +530,17 @@ mkConsensusTracers
      , ToObject (ForgeStateUpdateError blk)
      , Consensus.RunNode blk
      , HasKESMetricsData blk
+     , HasKESInfo blk
      , Show (Header blk)
      )
-  => TraceSelection
+  => Maybe EKGDirect
+  -> TraceSelection
   -> TracingVerbosity
   -> Trace IO Text
   -> NodeKernelData blk
   -> ForgingStats
   -> IO (Consensus.Tracers' peer localPeer blk (Tracer IO))
-mkConsensusTracers trSel verb tr nodeKern fStats = do
+mkConsensusTracers mbEKGDirect trSel verb tr nodeKern fStats = do
   let trmet = appendName "metrics" tr
 
   blockForgeOutcomeExtractor <- mkOutcomeExtractor
@@ -462,7 +548,6 @@ mkConsensusTracers trSel verb tr nodeKern fStats = do
   forgeTracers <- mkForgeTracers
   meta <- mkLOMeta Critical Public
 
-  tHeadersServed <- STM.newTVarIO @Int 0
   tBlocksServed <- STM.newTVarIO @Int 0
   tSubmissionsCollected <- STM.newTVarIO 0
   tSubmissionsAccepted <- STM.newTVarIO 0
@@ -470,12 +555,7 @@ mkConsensusTracers trSel verb tr nodeKern fStats = do
 
   pure Consensus.Tracers
     { Consensus.chainSyncClientTracer = tracerOnOff (traceChainSyncClient trSel) verb "ChainSyncClient" tr
-    , Consensus.chainSyncServerHeaderTracer = tracerOnOff' (traceChainSyncHeaderServer trSel) $
-        Tracer $ \ev -> do
-          traceWith (annotateSeverity . toLogObject' verb $ appendName "ChainSyncHeaderServer" tr) ev
-          when (isRollForward ev) $
-            traceI trmet meta "served.header.count" =<<
-              STM.modifyReadTVarIO tHeadersServed (+1)
+    , Consensus.chainSyncServerHeaderTracer = Tracer $ \ev -> traceServedCount mbEKGDirect ev
     , Consensus.chainSyncServerBlockTracer = tracerOnOff (traceChainSyncBlockServer trSel) verb "ChainSyncBlockServer" tr
     , Consensus.blockFetchDecisionTracer = tracerOnOff' (traceBlockFetchDecisions trSel) $
         annotateSeverity $ teeTraceBlockFetchDecision verb elidedFetchDecision tr
@@ -543,6 +623,12 @@ mkConsensusTracers trSel verb tr nodeKern fStats = do
        <*> counting (liftCounting staticMeta name "block-from-future" tr)
        <*> counting (liftCounting staticMeta name "slot-is-immutable" tr)
        <*> counting (liftCounting staticMeta name "node-is-leader" tr)
+
+   traceServedCount :: Maybe EKGDirect -> TraceChainSyncServerEvent blk -> IO ()
+   traceServedCount Nothing _ = pure ()
+   traceServedCount (Just ekgDirect) ev =
+     when (isRollForward ev) $
+       sendEKGDirectCounter ekgDirect "cardano.node.metrics.served.header.counter.int"
 
 traceLeadershipChecks ::
   forall blk
@@ -666,12 +752,14 @@ teeForge' tr =
           LogValue "adoptedSlotLast" $ PureI $ fromIntegral $ unSlotNo slot
 
 forgeTracer
-  :: ( Consensus.RunNode blk
+  :: forall blk.
+     ( Consensus.RunNode blk
      , ToObject (CannotForge blk)
      , ToObject (LedgerErr (LedgerState blk))
      , ToObject (OtherHeaderEnvelopeError blk)
      , ToObject (ValidationErr (BlockProtocol blk))
      , ToObject (ForgeStateUpdateError blk)
+     , HasKESInfo blk
      )
   => TracingVerbosity
   -> Trace IO Text
@@ -687,6 +775,29 @@ forgeTracer verb tr forgeTracers fStats =
     traceWith (annotateSeverity
                  $ teeForge forgeTracers verb
                  $ appendName "Forge" tr) tlcev
+    traceKESInfoIfKESExpired ev
+ where
+  traceKESInfoIfKESExpired ev =
+    case ev of
+      Consensus.TraceForgeStateUpdateError _ reason ->
+        -- KES-key cannot be evolved, but anyway trace KES-values.
+        case getKESInfo (Proxy @blk) reason of
+          Nothing -> pure ()
+          Just kesInfo -> do
+            let logValues :: [LOContent a]
+                logValues =
+                  [ LogValue "operationalCertificateStartKESPeriod"
+                      $ PureI . fromIntegral . unKESPeriod . HotKey.kesStartPeriod $ kesInfo
+                  , LogValue "operationalCertificateExpiryKESPeriod"
+                      $ PureI . fromIntegral . unKESPeriod . HotKey.kesEndPeriod $ kesInfo
+                  , LogValue "currentKESPeriod"
+                      $ PureI 0
+                  , LogValue "remainingKESPeriods"
+                      $ PureI 0
+                  ]
+            meta <- mkLOMeta Critical Confidential
+            mapM_ (traceNamedObject (appendName "metrics" tr) . (meta,)) logValues
+      _ -> pure ()
 
 notifyBlockForging
   :: ForgingStats
@@ -705,11 +816,15 @@ notifyBlockForging fStats tr = Tracer $ \case
             (\fts -> (fts { ftsNodeIsLeaderNum = ftsNodeIsLeaderNum fts + 1
                           , ftsLastSlot = slot },
                       ftsNodeIsLeaderNum fts + 1))
-  Consensus.TraceForgedBlock {} ->
+  Consensus.TraceForgedBlock {} -> do
     traceCounter "blocksForgedNum" tr
       =<< mapForgingCurrentThreadStats fStats
             (\fts -> (fts { ftsBlocksForgedNum = ftsBlocksForgedNum fts + 1 },
                        ftsBlocksForgedNum fts + 1))
+    meta <- mkLOMeta Critical Public
+    let tBlocksUncoupled = fsBlocksUncoupled fStats
+    traceI tr meta "uncoupledBlocks" =<< STM.modifyReadTVarIO tBlocksUncoupled (+ 1)
+
   Consensus.TraceNodeNotLeader (SlotNo slot') -> do
     -- Not is not a leader again, so now the number of blocks forged by this node
     -- should be equal to the number of slots when this node was a leader.
@@ -969,19 +1084,24 @@ data ChainInformation = ChainInformation
   , slotInEpoch :: Word64
     -- ^ Relative slot number of the tip of the current chain within the
     -- epoch.
+  , blocksUncoupledDelta :: Int64
+    -- ^ The net change in number of blocks forged since last restart not on the
+    -- current chain.
   }
 
 chainInformation
   :: forall blk. HasHeader (Header blk)
   => ChainDB.NewTipInfo blk
   -> AF.AnchoredFragment (Header blk)
+  -> Int64
   -> ChainInformation
-chainInformation newTipInfo frag = ChainInformation
-    { slots       = unSlotNo $ fromWithOrigin 0 (AF.headSlot frag)
-    , blocks      = unBlockNo $ fromWithOrigin (BlockNo 1) (AF.headBlockNo frag)
-    , density     = fragmentChainDensity frag
-    , epoch       = ChainDB.newTipEpoch newTipInfo
+chainInformation newTipInfo frag blocksUncoupledDelta = ChainInformation
+    { slots = unSlotNo $ fromWithOrigin 0 (AF.headSlot frag)
+    , blocks = unBlockNo $ fromWithOrigin (BlockNo 1) (AF.headBlockNo frag)
+    , density = fragmentChainDensity frag
+    , epoch = ChainDB.newTipEpoch newTipInfo
     , slotInEpoch = ChainDB.newTipSlotInEpoch newTipInfo
+    , blocksUncoupledDelta = blocksUncoupledDelta
     }
 
 fragmentChainDensity ::

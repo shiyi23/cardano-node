@@ -65,7 +65,7 @@ parseShelleyCommands =
       , Opt.command "address"
           (Opt.info (AddressCmd <$> pAddressCmd) $ Opt.progDesc "Payment address commands")
       , Opt.command "stake-address"
-          (Opt.info (StakeAddressCmd <$> pStakeAddress) $ Opt.progDesc "Stake address commands")
+          (Opt.info (StakeAddressCmd <$> pStakeAddressCmd) $ Opt.progDesc "Stake address commands")
       , Opt.command "key"
           (Opt.info (KeyCmd <$> pKeyCmd) $ Opt.progDesc "Key utility commands")
       , Opt.command "transaction"
@@ -199,8 +199,8 @@ pScript = ScriptFile <$> Opt.strOption
   <> Opt.completer (Opt.bashCompleter "file")
   )
 
-pStakeAddress :: Parser StakeAddressCmd
-pStakeAddress =
+pStakeAddressCmd :: Parser StakeAddressCmd
+pStakeAddressCmd =
     asum
       [ subParser "key-gen"
           (Opt.info pStakeAddressKeyGen $ Opt.progDesc "Create a stake address key pair")
@@ -476,6 +476,8 @@ pTransaction =
         (Opt.info pTransactionCalculateMinFee $ Opt.progDesc "Calculate the minimum fee for a transaction")
     , subParser "txid"
         (Opt.info pTransactionId $ Opt.progDesc "Print a transaction identifier")
+    , subParser "view" $
+        Opt.info pTransactionView $ Opt.progDesc "Print a transaction"
     ]
  where
   assembleInfo :: ParserInfo TransactionCmd
@@ -551,9 +553,10 @@ pTransaction =
     ParamsFromFile <$> pProtocolParamsFile
 
   pTransactionId  :: Parser TransactionCmd
-  pTransactionId = TxGetTxId <$> (Left  <$> pTxBodyFile Input
-                              <|> Right <$> pTxFile Input)
+  pTransactionId = TxGetTxId <$> pInputTxFile
 
+  pTransactionView :: Parser TransactionCmd
+  pTransactionView = TxView <$> pInputTxFile
 
 pNodeCmd :: Parser NodeCmd
 pNodeCmd =
@@ -734,7 +737,7 @@ pGovernanceCmd =
     pMIRCertificate :: Parser GovernanceCmd
     pMIRCertificate = GovernanceMIRCertificate
                         <$> pMIRPot
-                        <*> some pStakeVerificationKeyFile
+                        <*> some pStakeAddress
                         <*> some pRewardAmt
                         <*> pOutputFile
 
@@ -1518,7 +1521,7 @@ pCardanoEra = asum
       )
   , Opt.flag' (AnyCardanoEra ShelleyEra)
       (  Opt.long "shelley-era"
-      <> Opt.help "Specify the Shelley era (default)"
+      <> Opt.help "Specify the Shelley era"
       )
   , Opt.flag' (AnyCardanoEra AllegraEra)
       (  Opt.long "allegra-era"
@@ -1526,11 +1529,11 @@ pCardanoEra = asum
       )
   , Opt.flag' (AnyCardanoEra MaryEra)
       (  Opt.long "mary-era"
-      <> Opt.help "Specify the Mary era"
+      <> Opt.help "Specify the Mary era (default)"
       )
 
     -- Default for now:
-  , pure (AnyCardanoEra ShelleyEra)
+  , pure (AnyCardanoEra MaryEra)
   ]
 
 pTxIn :: Parser TxIn
@@ -1651,7 +1654,7 @@ pTxBodyFile fdir =
       (  Opt.strOption
            (  Opt.long optName
            <> Opt.metavar "FILE"
-           <> Opt.help (show fdir ++ " filepath of the TxBody.")
+           <> Opt.help (show fdir ++ " filepath of the JSON TxBody.")
            <> Opt.completer (Opt.bashCompleter "file")
            )
       <|>
@@ -1673,7 +1676,7 @@ pTxFile fdir =
       (  Opt.strOption
            (  Opt.long optName
            <> Opt.metavar "FILE"
-           <> Opt.help (show fdir ++ " filepath of the Tx.")
+           <> Opt.help (show fdir ++ " filepath of the JSON Tx.")
            <> Opt.completer (Opt.bashCompleter "file")
            )
       <|>
@@ -1687,6 +1690,10 @@ pTxFile fdir =
       case fdir of
         Input -> "tx-file"
         Output -> "out-file"
+
+pInputTxFile :: Parser InputTxFile
+pInputTxFile =
+  InputTxBodyFile <$> pTxBodyFile Input <|> InputTxFile <$> pTxFile Input
 
 pTxInCount :: Parser TxInCount
 pTxInCount =
@@ -1770,6 +1777,14 @@ pAddress =
       (  Opt.long "address"
       <> Opt.metavar "ADDRESS"
       <> Opt.help "A Cardano address"
+      )
+
+pStakeAddress :: Parser StakeAddress
+pStakeAddress =
+    Opt.option (readerFromAttoParser parseStakeAddress)
+      (  Opt.long "stake-address"
+      <> Opt.metavar "ADDRESS"
+      <> Opt.help "Target stake address (bech32 format)."
       )
 
 pStakeVerificationKeyOrFile :: Parser (VerificationKeyOrFile StakeKey)
@@ -2453,4 +2468,3 @@ readerFromParsecParser p =
 subParser :: String -> ParserInfo a -> Parser a
 subParser availableCommand pInfo =
   Opt.hsubparser $ Opt.command availableCommand pInfo <> Opt.metavar availableCommand
-

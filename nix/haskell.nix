@@ -29,6 +29,11 @@ let
   # will run twice.
   cabalProjectLocal = ''
     allow-newer: terminfo:base
+  ''
+  # Needed for the Windows cabal constraint solver.
+  + lib.optionalString stdenv.hostPlatform.isWindows ''
+    max-backjumps: 10000
+    reorder-goals: True
   '';
 
   projectPackages = lib.attrNames (haskell-nix.haskellLib.selectProjectPackages
@@ -79,11 +84,17 @@ let
         });
       }
       {
-        # Stamp executables with the git revision
+        # Stamp executables with the git revision and add shell completion
         packages = lib.genAttrs ["cardano-node" "cardano-cli"] (name: {
           components.exes.${name}.postInstall = ''
             ${lib.optionalString stdenv.hostPlatform.isWindows setLibSodium}
             ${setGitRev}
+          '' + lib.optionalString (!stdenv.hostPlatform.isWindows) ''
+            BASH_COMPLETIONS=$out/share/bash-completion/completions
+            ZSH_COMPLETIONS=$out/share/zsh/site-functions
+            mkdir -p $BASH_COMPLETIONS $ZSH_COMPLETIONS
+            $out/bin/${name} --bash-completion-script ${name} > $BASH_COMPLETIONS/${name}
+            $out/bin/${name} --zsh-completion-script ${name} > $ZSH_COMPLETIONS/_${name}
           '';
         });
       }
